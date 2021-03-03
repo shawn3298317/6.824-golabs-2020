@@ -65,7 +65,7 @@ type Raft struct {
 	// Persistent state fields
 	currentTerm int
 	votedFor    *int // could be nil
-	log	        []*LogEntry // TODO: decide if we need pointer here
+	log	        []*LogEntry
 	state       State
 	voteCount   int
 
@@ -453,14 +453,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.electionTimeout = time.Duration(550 + (rand.Int63() % 100)) * time.Millisecond // 350~450ms
 	rf.heartbeatInterval = time.Duration(150) * time.Millisecond
 	rf.state = FOLLOWER
-	
-	//resetTimer := make(chan struct{})
 	rf.electionTimerReset = make(chan struct{})
-	// TODO: create a background goroutine that will kick off leader election periodically
-	// by sending out RequestVote RPCs when it hasn't heard from another peer for a while.
+	
 	go startLeaderElectionRoutine(rf, rf.electionTimerReset) // terminate & cleanup when rf.killed() is true
 	
-	// TODO: start heartbeat go routine?? (triggered by state change (keep polling raft state??))
 	go sendLeaderHeartbeatRoutine(rf, rf.electionTimerReset) // terminate & cleanup when rf.killed() is true
 	
 	// TODO: start goroutine that sends log cmd to applyCh up to commitIndex
@@ -486,7 +482,6 @@ func applyLogCommandRoutine(rf *Raft) {
 
 // Gorountine that sends periodic heartbeat if current server think it's the leader
 func sendLeaderHeartbeatRoutine(rf *Raft, resetTimer chan<- struct{}) {
-	// TODO: check if leader needs to reset timer whenever it sends heartbeat?
 	
 	for {
 		if rf.killed() {
@@ -571,8 +566,6 @@ func startLeaderElectionRoutine(rf *Raft, resetTimer <-chan struct{}) {
 		rf.mu.RUnlock()
 		
 		if curState == LEADER {
-			// TODO: check if we really need this (if rf.killed() will cause alot of overhead)
-			//rf.logger.Debug("I'm a leader and I don't need to countdown :)")
 			time.Sleep(30 * time.Millisecond)
 			continue
 		} else { // FOLLOWER & CANDIDATE
