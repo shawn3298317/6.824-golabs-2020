@@ -290,8 +290,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 				rf.state = LEADER
 				rf.votedFor = nil
 				rf.voteCount = 0
-				// TODO: check if we need to refresh electionTimeoutTimer here?
-				// I think we need, otherwise timer will keep waiting, need external interrupt
 				rf.electionTimerReset <- struct{}{}
 			}
 		}
@@ -324,34 +322,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (2A, 2B).
 	
 	rf.mu.RLock()
-	defer rf.mu.RUnlock()
+	currentTerm := rf.currentTerm
+	rf.mu.RUnlock()
 	
 	// Match term no.
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
+	if args.Term < currentTerm {
+		reply.Term = currentTerm
 		reply.Success = false
 		return
-	} else if args.Term > rf.currentTerm {
+	} else if args.Term > currentTerm {
+		rf.mu.Lock()
 		rf.currentTerm = args.Term
+		rf.mu.Unlock()
 	}
 	
-	reply.Term = rf.currentTerm
+	reply.Term = currentTerm
 	
 	if args.Entries == nil {
 		// Handling heartbeats
 		rf.logger.Debugf("Term %d: Got heartbeat from leader(%d)", args.Term, args.LeaderId)
+		rf.mu.Lock()
 		if rf.state != FOLLOWER {
 			rf.logger.Debugf("Convert into follower (Before was: %s)", rf.state)
 			rf.state = FOLLOWER
 		}
+		rf.mu.Unlock()
 		rf.electionTimerReset <- struct {}{} // refresh electiontimeouttimer
 		reply.Success = true
 		
 		// TODO: even with heartbeat RPC, server needs to check logEntry index, commitIndex and stuff...
-		return
-	} else {
-		// TODO: Handling log appends (lab 2b+)
-		// reply false if log doesn't conatin entry at prevLogIndex whose term matches prevLogTerm
 	}
 	return
 	
@@ -427,39 +426,21 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	
-	// Logger settings
-	//logFile, err := os.OpenFile("./test.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	//if err == nil {
-	//	log.SetOutput(logFile)
-	//
-	//var mylogger = &log.Logger{
-	//	Out: os.Stdout,
-	//	Formatter: new(log.TextFormatter), //new(log.TextFormatter{FullTimestamp: true, DisableColors: false}),
-	//	Level: log.DebugLevel
-	//}
-	//rf.logger = log.New(&log.Logger{})
-	//log.SetOutput(os.Stdout)
-	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp: true,
-		DisableColors: false,
-		TimestampFormat: "15:04:01.000",
-	})
 	log.SetLevel(log.InfoLevel)
-	
+	rf.mu.Lock()
 	rf.logger = log.WithFields(log.Fields{
 		"Peer": me,
 	})
 	rf.electionTimeout = time.Duration(550 + (rand.Int63() % 100)) * time.Millisecond // 350~450ms
-	rf.heartbeatInterval = time.Duration(150) * time.Millisecond
+	rf.heartbeatInterval = time.Duration(50) * time.Millisecond
 	rf.state = FOLLOWER
 	rf.electionTimerReset = make(chan struct{})
+	rf.mu.Unlock()
 	
-	go startLeaderElectionRoutine(rf, rf.electionTimerReset) // terminate & cleanup when rf.killed() is true
+	go startLeaderElectionRoutine(rf) // terminate & cleanup when rf.killed() is true
 	
-	go sendLeaderHeartbeatRoutine(rf, rf.electionTimerReset) // terminate & cleanup when rf.killed() is true
+	go sendLeaderHeartbeatRoutine(rf) // terminate & cleanup when rf.killed() is true
 	
-	// TODO: start goroutine that sends log cmd to applyCh up to commitIndex
 	go applyLogCommandRoutine(rf) // terminate & cleanup when rf.killed() is true
 	
 	// initialize from state persisted before a crash
@@ -472,7 +453,7 @@ func applyLogCommandRoutine(rf *Raft) {
 	// TODO: lab 2b+
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping applyLogCommand thread...")
+			rf.logger.Info("Raft server killed. Stopping applyLogCommand thread...")
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -481,11 +462,11 @@ func applyLogCommandRoutine(rf *Raft) {
 }
 
 // Gorountine that sends periodic heartbeat if current server think it's the leader
-func sendLeaderHeartbeatRoutine(rf *Raft, resetTimer chan<- struct{}) {
+func sendLeaderHeartbeatRoutine(rf *Raft) {
 	
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping heartbeat thread...")
+			rf.logger.Info("Raft server killed. Stopping heartbeat thread...")
 			return
 		}
 		
@@ -496,17 +477,6 @@ func sendLeaderHeartbeatRoutine(rf *Raft, resetTimer chan<- struct{}) {
 		rf.mu.RUnlock()
 		
 		if curState == LEADER {
-			// fill in AppendEntries argument struct
-			rf.mu.RLock()
-			args := AppendEntriesArgs{
-				Term: rf.currentTerm,
-				LeaderId: rf.me,
-				PrevLogIndex: 0, // TODO: lab 2b+
-				PrevLogTerm: 0, // TODO: lab 2b+
-				Entries: nil,
-				LeaderCommit: 0, // TODO: lab 2b+
-			}
-			rf.mu.RUnlock()
 			
 			// send AppendEntries RPC to all follower peers
 			for index, _ := range rf.peers {
@@ -514,6 +484,17 @@ func sendLeaderHeartbeatRoutine(rf *Raft, resetTimer chan<- struct{}) {
 				// send RPC and handle reply in the same goroutine
 				go func(server int) {
 					rf.logger.Debugf("Sending heartbeat to peer(%d)", server)
+					rf.mu.RLock()
+					// fill in AppendEntries argument struct
+					args := AppendEntriesArgs{
+						Term: rf.currentTerm,
+						LeaderId: rf.me,
+						PrevLogIndex: 0, // TODO: lab 2b+
+						PrevLogTerm: 0, // TODO: lab 2b+
+						Entries: nil,
+						LeaderCommit: 0, // TODO: lab 2b+
+					}
+					rf.mu.RUnlock()
 					reply := AppendEntriesReply{}
 					ok := rf.sendAppendEntries(server, &args, &reply)
 					
@@ -543,7 +524,7 @@ func sendLeaderHeartbeatRoutine(rf *Raft, resetTimer chan<- struct{}) {
 }
 
 // Goroutine that triggers leader reelection and calls peer RequestVote RPC whenever electiontimeout timer is up
-func startLeaderElectionRoutine(rf *Raft, resetTimer <-chan struct{}) {
+func startLeaderElectionRoutine(rf *Raft) {
 	
 	rf.mu.RLock()
 	electionTimeout := rf.electionTimeout
@@ -553,11 +534,11 @@ func startLeaderElectionRoutine(rf *Raft, resetTimer <-chan struct{}) {
 	rf.logger.WithFields(log.Fields{
 		"timeout": electionTimeout,
 		"state": curState,
-	}).Print("Starting leader election routine")
+	}).Info("Starting leader election routine")
 	
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping leader election thread...")
+			rf.logger.Info("Raft server killed. Stopping leader election thread...")
 			break
 		}
 		
@@ -606,7 +587,7 @@ func startLeaderElectionRoutine(rf *Raft, resetTimer <-chan struct{}) {
 				}
 				
 				
-			case <-resetTimer: // Got timeout refresh interrupt from other events
+			case <-rf.electionTimerReset: // Got timeout refresh interrupt from other events
 				rf.logger.Debug("Got reset Timer interrupt!")
 			}
 		}
