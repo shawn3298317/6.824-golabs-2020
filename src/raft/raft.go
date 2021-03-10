@@ -426,7 +426,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	log.SetLevel(log.DebugLevel)
+	log.SetLevel(log.InfoLevel)
 	rf.mu.Lock()
 	rf.logger = log.WithFields(log.Fields{
 		"Peer": me,
@@ -453,7 +453,7 @@ func applyLogCommandRoutine(rf *Raft) {
 	// TODO: lab 2b+
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping applyLogCommand thread...")
+			rf.logger.Info("Raft server killed. Stopping applyLogCommand thread...")
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -466,7 +466,7 @@ func sendLeaderHeartbeatRoutine(rf *Raft) {
 	
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping heartbeat thread...")
+			rf.logger.Info("Raft server killed. Stopping heartbeat thread...")
 			return
 		}
 		
@@ -534,11 +534,11 @@ func startLeaderElectionRoutine(rf *Raft) {
 	rf.logger.WithFields(log.Fields{
 		"timeout": electionTimeout,
 		"state": curState,
-	}).Print("Starting leader election routine")
+	}).Info("Starting leader election routine")
 	
 	for {
 		if rf.killed() {
-			rf.logger.Error("Raft server killed. Stopping leader election thread...")
+			rf.logger.Info("Raft server killed. Stopping leader election thread...")
 			break
 		}
 		
@@ -547,8 +547,6 @@ func startLeaderElectionRoutine(rf *Raft) {
 		rf.mu.RUnlock()
 		
 		if curState == LEADER {
-			// TODO: check if we really need this (if rf.killed() will cause alot of overhead)
-			//rf.logger.Debug("I'm a leader and I don't need to countdown :)")
 			time.Sleep(30 * time.Millisecond)
 			continue
 		} else { // FOLLOWER & CANDIDATE
